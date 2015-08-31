@@ -1070,8 +1070,7 @@ static void exynos_dp_enable(struct drm_encoder *encoder)
 	struct exynos_dp_device *dp = encoder_to_dp(encoder);
 	struct exynos_drm_crtc *crtc = dp_to_crtc(dp);
 
-	if (dp->dpms_mode == DRM_MODE_DPMS_ON)
-		return;
+	pm_runtime_get_sync(dp->dev);
 
 	if (dp->panel) {
 		if (drm_panel_prepare(dp->panel)) {
@@ -1083,22 +1082,16 @@ static void exynos_dp_enable(struct drm_encoder *encoder)
 	if (crtc->ops->clock_enable)
 		crtc->ops->clock_enable(dp_to_crtc(dp), true);
 
-	clk_prepare_enable(dp->clock);
 	phy_power_on(dp->phy);
 	exynos_dp_init_dp(dp);
 	enable_irq(dp->irq);
 	exynos_dp_commit(&dp->encoder);
-
-	dp->dpms_mode = DRM_MODE_DPMS_ON;
 }
 
 static void exynos_dp_disable(struct drm_encoder *encoder)
 {
 	struct exynos_dp_device *dp = encoder_to_dp(encoder);
 	struct exynos_drm_crtc *crtc = dp_to_crtc(dp);
-
-	if (dp->dpms_mode != DRM_MODE_DPMS_ON)
-		return;
 
 	if (dp->panel) {
 		if (drm_panel_disable(dp->panel)) {
@@ -1110,7 +1103,6 @@ static void exynos_dp_disable(struct drm_encoder *encoder)
 	disable_irq(dp->irq);
 	flush_work(&dp->hotplug_work);
 	phy_power_off(dp->phy);
-	clk_disable_unprepare(dp->clock);
 
 	if (crtc->ops->clock_enable)
 		crtc->ops->clock_enable(dp_to_crtc(dp), false);
@@ -1120,7 +1112,7 @@ static void exynos_dp_disable(struct drm_encoder *encoder)
 			DRM_ERROR("failed to turnoff the panel\n");
 	}
 
-	dp->dpms_mode = DRM_MODE_DPMS_OFF;
+	pm_runtime_put_sync(dp->dev);
 }
 
 static struct drm_encoder_helper_funcs exynos_dp_encoder_helper_funcs = {
@@ -1216,7 +1208,6 @@ static int exynos_dp_bind(struct device *dev, struct device *master, void *data)
 	int pipe, ret = 0;
 
 	dp->dev = &pdev->dev;
-	dp->dpms_mode = DRM_MODE_DPMS_OFF;
 
 	dp->video_info = exynos_dp_dt_parse_pdata(&pdev->dev);
 	if (IS_ERR(dp->video_info))
@@ -1341,6 +1332,7 @@ static int exynos_dp_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct device_node *panel_node, *bridge_node, *endpoint;
 	struct exynos_dp_device *dp;
+	int ret;
 
 	dp = devm_kzalloc(&pdev->dev, sizeof(struct exynos_dp_device),
 				GFP_KERNEL);
@@ -1369,11 +1361,23 @@ static int exynos_dp_probe(struct platform_device *pdev)
 			return -EPROBE_DEFER;
 	}
 
-	return component_add(&pdev->dev, &exynos_dp_ops);
+	pm_runtime_enable(dev);
+
+	ret = component_add(&pdev->dev, &exynos_dp_ops);
+	if (ret)
+		goto err_disable_pm_runtime;
+
+	return ret;
+
+err_disable_pm_runtime:
+	pm_runtime_disable(dev);
+
+	return ret;
 }
 
 static int exynos_dp_remove(struct platform_device *pdev)
 {
+	pm_runtime_disable(&pdev->dev);
 	component_del(&pdev->dev, &exynos_dp_ops);
 
 	return 0;
@@ -1384,21 +1388,29 @@ static int exynos_dp_suspend(struct device *dev)
 {
 	struct exynos_dp_device *dp = dev_get_drvdata(dev);
 
-	exynos_dp_disable(&dp->encoder);
+	clk_disable_unprepare(dp->clock);
+
 	return 0;
 }
 
 static int exynos_dp_resume(struct device *dev)
 {
 	struct exynos_dp_device *dp = dev_get_drvdata(dev);
+	int ret;
 
-	exynos_dp_enable(&dp->encoder);
+	ret = clk_prepare_enable(dp->clock);
+	if (ret < 0) {
+		DRM_ERROR("Failed to prepare_enable the clock clk [%d]\n", ret);
+		return ret;
+	}
+
 	return 0;
 }
 #endif
 
 static const struct dev_pm_ops exynos_dp_pm_ops = {
 	SET_SYSTEM_SLEEP_PM_OPS(exynos_dp_suspend, exynos_dp_resume)
+	SET_RUNTIME_PM_OPS(exynos_dp_suspend, exynos_dp_resume, NULL)
 };
 
 static const struct of_device_id exynos_dp_match[] = {
