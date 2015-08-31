@@ -92,7 +92,6 @@ struct hdmi_context {
 	struct drm_device		*drm_dev;
 	struct drm_connector		connector;
 	bool				hpd;
-	bool				powered;
 	bool				dvi_mode;
 
 	void __iomem			*regs;
@@ -1726,11 +1725,6 @@ static void hdmi_enable(struct drm_encoder *encoder)
 	struct hdmi_context *hdata = encoder_to_hdmi(encoder);
 	struct hdmi_resources *res = &hdata->res;
 
-	if (hdata->powered)
-		return;
-
-	hdata->powered = true;
-
 	pm_runtime_get_sync(hdata->dev);
 
 	if (regulator_bulk_enable(res->regul_count, res->regul_bulk))
@@ -1739,9 +1733,6 @@ static void hdmi_enable(struct drm_encoder *encoder)
 	/* set pmu hdmiphy control bit to enable hdmiphy */
 	regmap_update_bits(hdata->pmureg, PMU_HDMI_PHY_CONTROL,
 			PMU_HDMI_PHY_ENABLE_BIT, 1);
-
-	clk_prepare_enable(res->hdmi);
-	clk_prepare_enable(res->sclk_hdmi);
 
 	hdmiphy_poweron(hdata);
 	hdmi_conf_apply(hdata);
@@ -1753,9 +1744,6 @@ static void hdmi_disable(struct drm_encoder *encoder)
 	struct hdmi_resources *res = &hdata->res;
 	struct drm_crtc *crtc = encoder->crtc;
 	const struct drm_crtc_helper_funcs *funcs = NULL;
-
-	if (!hdata->powered)
-		return;
 
 	/*
 	 * The SFRs of VP and Mixer are updated by Vertical Sync of
@@ -1778,9 +1766,6 @@ static void hdmi_disable(struct drm_encoder *encoder)
 
 	cancel_delayed_work(&hdata->hotplug_work);
 
-	clk_disable_unprepare(res->sclk_hdmi);
-	clk_disable_unprepare(res->hdmi);
-
 	/* reset pmu hdmiphy control bit to disable hdmiphy */
 	regmap_update_bits(hdata->pmureg, PMU_HDMI_PHY_CONTROL,
 			PMU_HDMI_PHY_ENABLE_BIT, 0);
@@ -1788,8 +1773,6 @@ static void hdmi_disable(struct drm_encoder *encoder)
 	regulator_bulk_disable(res->regul_count, res->regul_bulk);
 
 	pm_runtime_put_sync(hdata->dev);
-
-	hdata->powered = false;
 }
 
 static struct drm_encoder_helper_funcs exynos_hdmi_encoder_helper_funcs = {
@@ -2146,12 +2129,51 @@ static int hdmi_remove(struct platform_device *pdev)
 	return 0;
 }
 
+#ifdef CONFIG_PM_SLEEP
+static int exynos_hdmi_suspend(struct device *dev)
+{
+	struct hdmi_context *hdata = dev_get_drvdata(dev);
+	struct hdmi_resources *res = &hdata->res;
+
+	clk_disable_unprepare(res->sclk_hdmi);
+	clk_disable_unprepare(res->hdmi);
+
+	return 0;
+}
+
+static int exynos_hdmi_resume(struct device *dev)
+{
+	struct hdmi_context *hdata = dev_get_drvdata(dev);
+	struct hdmi_resources *res = &hdata->res;
+	int ret;
+
+	ret = clk_prepare_enable(res->hdmi);
+	if (ret < 0) {
+		DRM_ERROR("Failed to prepare_enable the hdmi clk [%d]\n", ret);
+		return ret;
+	}
+	ret = clk_prepare_enable(res->sclk_hdmi);
+	if (ret < 0) {
+		DRM_ERROR("Failed to prepare_enable the sclk_mixer clk [%d]\n",
+			  ret);
+		return ret;
+	}
+
+	return 0;
+}
+#endif
+
+static const struct dev_pm_ops exynos_hdmi_pm_ops = {
+	SET_RUNTIME_PM_OPS(exynos_hdmi_suspend, exynos_hdmi_resume, NULL)
+};
+
 struct platform_driver hdmi_driver = {
 	.probe		= hdmi_probe,
 	.remove		= hdmi_remove,
 	.driver		= {
 		.name	= "exynos-hdmi",
 		.owner	= THIS_MODULE,
+		.pm	= &exynos_hdmi_pm_ops,
 		.of_match_table = hdmi_match_types,
 	},
 };
