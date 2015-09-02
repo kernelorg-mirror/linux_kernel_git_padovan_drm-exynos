@@ -55,15 +55,6 @@ exynos_drm_crtc_mode_fixup(struct drm_crtc *crtc,
 	return true;
 }
 
-static void
-exynos_drm_crtc_mode_set_nofb(struct drm_crtc *crtc)
-{
-	struct exynos_drm_crtc *exynos_crtc = to_exynos_crtc(crtc);
-
-	if (exynos_crtc->ops->commit)
-		exynos_crtc->ops->commit(exynos_crtc);
-}
-
 static void exynos_crtc_atomic_begin(struct drm_crtc *crtc,
 				     struct drm_crtc_state *old_crtc_state)
 {
@@ -100,7 +91,6 @@ static struct drm_crtc_helper_funcs exynos_crtc_helper_funcs = {
 	.enable		= exynos_drm_crtc_enable,
 	.disable	= exynos_drm_crtc_disable,
 	.mode_fixup	= exynos_drm_crtc_mode_fixup,
-	.mode_set_nofb	= exynos_drm_crtc_mode_set_nofb,
 	.atomic_begin	= exynos_crtc_atomic_begin,
 	.atomic_flush	= exynos_crtc_atomic_flush,
 };
