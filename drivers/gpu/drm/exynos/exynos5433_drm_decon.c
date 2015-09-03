@@ -36,7 +36,6 @@ struct decon_context {
 	unsigned int			default_win;
 	unsigned long			irq_flags;
 	int				pipe;
-	bool				suspended;
 
 #define BIT_CLKS_ENABLED		0
 #define BIT_IRQS_ENABLED		1
@@ -66,9 +65,6 @@ static int decon_enable_vblank(struct exynos_drm_crtc *crtc)
 	struct decon_context *ctx = crtc->ctx;
 	u32 val;
 
-	if (ctx->suspended)
-		return -EPERM;
-
 	if (test_and_set_bit(0, &ctx->irq_flags)) {
 		val = VIDINTCON0_INTEN;
 		if (ctx->i80_if)
@@ -86,9 +82,6 @@ static void decon_disable_vblank(struct exynos_drm_crtc *crtc)
 {
 	struct decon_context *ctx = crtc->ctx;
 
-	if (ctx->suspended)
-		return;
-
 	if (test_and_clear_bit(0, &ctx->irq_flags))
 		writel(0, ctx->addr + DECON_VIDINTCON0);
 }
@@ -105,9 +98,6 @@ static void decon_commit(struct exynos_drm_crtc *crtc)
 	struct decon_context *ctx = crtc->ctx;
 	struct drm_display_mode *mode = &crtc->base.mode;
 	u32 val;
-
-	if (ctx->suspended)
-		return;
 
 	/* enable clock gate */
 	val = CMU_CLKGAGE_MODE_SFR_F | CMU_CLKGAGE_MODE_MEM_F;
@@ -231,9 +221,6 @@ static void decon_atomic_begin(struct exynos_drm_crtc *crtc,
 {
 	struct decon_context *ctx = crtc->ctx;
 
-	if (ctx->suspended)
-		return;
-
 	decon_shadow_protect_win(ctx, plane->zpos, true);
 }
 
@@ -246,9 +233,6 @@ static void decon_update_plane(struct exynos_drm_crtc *crtc,
 	unsigned int bpp = state->fb->bits_per_pixel >> 3;
 	unsigned int pitch = state->fb->pitches[0];
 	u32 val;
-
-	if (ctx->suspended)
-		return;
 
 	val = COORDINATE_X(plane->crtc_x) | COORDINATE_Y(plane->crtc_y);
 	writel(val, ctx->addr + DECON_VIDOSDxA(win));
@@ -294,9 +278,6 @@ static void decon_disable_plane(struct exynos_drm_crtc *crtc,
 	unsigned int win = plane->zpos;
 	u32 val;
 
-	if (ctx->suspended)
-		return;
-
 	decon_shadow_protect_win(ctx, win, true);
 
 	/* window disable */
@@ -316,9 +297,6 @@ static void decon_atomic_flush(struct exynos_drm_crtc *crtc,
 				struct exynos_drm_plane *plane)
 {
 	struct decon_context *ctx = crtc->ctx;
-
-	if (ctx->suspended)
-		return;
 
 	decon_shadow_protect_win(ctx, plane->zpos, false);
 
@@ -352,21 +330,8 @@ static void decon_swreset(struct decon_context *ctx)
 static void decon_enable(struct exynos_drm_crtc *crtc)
 {
 	struct decon_context *ctx = crtc->ctx;
-	int ret;
-	int i;
-
-	if (!ctx->suspended)
-		return;
-
-	ctx->suspended = false;
 
 	pm_runtime_get_sync(ctx->dev);
-
-	for (i = 0; i < ARRAY_SIZE(decon_clks_name); i++) {
-		ret = clk_prepare_enable(ctx->clks[i]);
-		if (ret < 0)
-			goto err;
-	}
 
 	set_bit(BIT_CLKS_ENABLED, &ctx->enabled);
 
@@ -377,20 +342,12 @@ static void decon_enable(struct exynos_drm_crtc *crtc)
 	decon_commit(ctx->crtc);
 
 	return;
-err:
-	while (--i >= 0)
-		clk_disable_unprepare(ctx->clks[i]);
-
-	ctx->suspended = true;
 }
 
 static void decon_disable(struct exynos_drm_crtc *crtc)
 {
 	struct decon_context *ctx = crtc->ctx;
 	int i;
-
-	if (ctx->suspended)
-		return;
 
 	/*
 	 * We need to make sure that all windows are disabled before we
@@ -402,14 +359,9 @@ static void decon_disable(struct exynos_drm_crtc *crtc)
 
 	decon_swreset(ctx);
 
-	for (i = 0; i < ARRAY_SIZE(decon_clks_name); i++)
-		clk_disable_unprepare(ctx->clks[i]);
-
 	clear_bit(BIT_CLKS_ENABLED, &ctx->enabled);
 
 	pm_runtime_put_sync(ctx->dev);
-
-	ctx->suspended = true;
 }
 
 void decon_te_irq_handler(struct exynos_drm_crtc *crtc)
@@ -476,7 +428,6 @@ err:
 static struct exynos_drm_crtc_ops decon_crtc_ops = {
 	.enable			= decon_enable,
 	.disable		= decon_disable,
-	.commit			= decon_commit,
 	.enable_vblank		= decon_enable_vblank,
 	.disable_vblank		= decon_disable_vblank,
 	.atomic_begin		= decon_atomic_begin,
@@ -607,7 +558,6 @@ static int exynos5433_decon_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	ctx->default_win = 0;
-	ctx->suspended = true;
 	ctx->dev = dev;
 	if (of_get_child_by_name(dev->of_node, "i80-if-timings"))
 		ctx->i80_if = true;
@@ -674,6 +624,44 @@ static int exynos5433_decon_remove(struct platform_device *pdev)
 	return 0;
 }
 
+#ifdef CONFIG_PM_SLEEP
+static int exynos5433_decon_suspend(struct device *dev)
+{
+	struct decon_context *ctx = dev_get_drvdata(dev);
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(decon_clks_name); i++)
+		clk_disable_unprepare(ctx->clks[i]);
+
+	return 0;
+}
+
+static int exynos5433_decon_resume(struct device *dev)
+{
+	struct decon_context *ctx = dev_get_drvdata(dev);
+	int i, ret;
+
+	for (i = 0; i < ARRAY_SIZE(decon_clks_name); i++) {
+		ret = clk_prepare_enable(ctx->clks[i]);
+		if (ret < 0)
+			goto err;
+	}
+
+	return 0;
+
+err:
+	while (--i >= 0)
+		clk_disable_unprepare(ctx->clks[i]);
+
+	return ret;
+}
+#endif
+
+static const struct dev_pm_ops exynos5433_decon_pm_ops = {
+	SET_RUNTIME_PM_OPS(exynos5433_decon_suspend, exynos5433_decon_resume,
+			   NULL)
+};
+
 static const struct of_device_id exynos5433_decon_driver_dt_match[] = {
 	{ .compatible = "samsung,exynos5433-decon" },
 	{},
@@ -685,6 +673,7 @@ struct platform_driver exynos5433_decon_driver = {
 	.remove		= exynos5433_decon_remove,
 	.driver		= {
 		.name	= "exynos5433-decon",
+		.pm	= &exynos5433_decon_pm_ops,
 		.of_match_table = exynos5433_decon_driver_dt_match,
 	},
 };
