@@ -37,11 +37,6 @@
 #define ctx_from_connector(c)	container_of(c, struct exynos_dp_device, \
 					connector)
 
-static inline struct exynos_drm_crtc *dp_to_crtc(struct exynos_dp_device *dp)
-{
-	return to_exynos_crtc(dp->encoder.crtc);
-}
-
 static inline struct exynos_dp_device *encoder_to_dp(
 						struct drm_encoder *e)
 {
@@ -1068,7 +1063,6 @@ static void exynos_dp_mode_set(struct drm_encoder *encoder,
 static void exynos_dp_enable(struct drm_encoder *encoder)
 {
 	struct exynos_dp_device *dp = encoder_to_dp(encoder);
-	struct exynos_drm_crtc *crtc = dp_to_crtc(dp);
 
 	pm_runtime_get_sync(dp->dev);
 
@@ -1079,9 +1073,6 @@ static void exynos_dp_enable(struct drm_encoder *encoder)
 		}
 	}
 
-	if (crtc->ops->clock_enable)
-		crtc->ops->clock_enable(dp_to_crtc(dp), true);
-
 	phy_power_on(dp->phy);
 	exynos_dp_init_dp(dp);
 	enable_irq(dp->irq);
@@ -1091,7 +1082,6 @@ static void exynos_dp_enable(struct drm_encoder *encoder)
 static void exynos_dp_disable(struct drm_encoder *encoder)
 {
 	struct exynos_dp_device *dp = encoder_to_dp(encoder);
-	struct exynos_drm_crtc *crtc = dp_to_crtc(dp);
 
 	if (dp->panel) {
 		if (drm_panel_disable(dp->panel)) {
@@ -1103,9 +1093,6 @@ static void exynos_dp_disable(struct drm_encoder *encoder)
 	disable_irq(dp->irq);
 	flush_work(&dp->hotplug_work);
 	phy_power_off(dp->phy);
-
-	if (crtc->ops->clock_enable)
-		crtc->ops->clock_enable(dp_to_crtc(dp), false);
 
 	if (dp->panel) {
 		if (drm_panel_unprepare(dp->panel))

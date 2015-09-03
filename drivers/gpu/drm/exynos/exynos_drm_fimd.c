@@ -574,6 +574,23 @@ static void fimd_win_set_colkey(struct fimd_context *ctx, unsigned int win)
 	writel(keycon1, ctx->regs + WKEYCON1_BASE(win));
 }
 
+static void fimd_dp_clock_enable(struct exynos_drm_crtc *crtc, bool enable)
+{
+	struct fimd_context *ctx = crtc->ctx;
+	u32 val;
+
+	/*
+	 * Only Exynos 5250, 5260, 5410 and 542x requires enabling DP/MIE
+	 * clock. On these SoCs the bootloader may enable it but any
+	 * power domain off/on will reset it to disable state.
+	 */
+	if (ctx->driver_data != &exynos5_fimd_driver_data)
+		return;
+
+	val = enable ? DP_MIE_CLK_DP_ENABLE : DP_MIE_CLK_DISABLE;
+	writel(DP_MIE_CLK_DP_ENABLE, ctx->regs + DP_MIE_CLKCON);
+}
+
 /**
  * shadow_protect_win() - disable updating values from shadow registers at vsync
  *
@@ -736,6 +753,8 @@ static void fimd_enable(struct exynos_drm_crtc *crtc)
 	if (test_and_clear_bit(0, &ctx->irq_flags))
 		fimd_enable_vblank(ctx->crtc);
 
+	fimd_dp_clock_enable(crtc, true);
+
 	fimd_commit(ctx->crtc);
 }
 
@@ -743,6 +762,8 @@ static void fimd_disable(struct exynos_drm_crtc *crtc)
 {
 	struct fimd_context *ctx = crtc->ctx;
 	int i;
+
+	fimd_dp_clock_enable(crtc, false);
 
 	/*
 	 * We need to make sure that all windows are disabled before we
@@ -815,23 +836,6 @@ static void fimd_te_handler(struct exynos_drm_crtc *crtc)
 		drm_crtc_handle_vblank(&ctx->crtc->base);
 }
 
-static void fimd_dp_clock_enable(struct exynos_drm_crtc *crtc, bool enable)
-{
-	struct fimd_context *ctx = crtc->ctx;
-	u32 val;
-
-	/*
-	 * Only Exynos 5250, 5260, 5410 and 542x requires enabling DP/MIE
-	 * clock. On these SoCs the bootloader may enable it but any
-	 * power domain off/on will reset it to disable state.
-	 */
-	if (ctx->driver_data != &exynos5_fimd_driver_data)
-		return;
-
-	val = enable ? DP_MIE_CLK_DP_ENABLE : DP_MIE_CLK_DISABLE;
-	writel(DP_MIE_CLK_DP_ENABLE, ctx->regs + DP_MIE_CLKCON);
-}
-
 static const struct exynos_drm_crtc_ops fimd_crtc_ops = {
 	.enable = fimd_enable,
 	.disable = fimd_disable,
@@ -844,7 +848,6 @@ static const struct exynos_drm_crtc_ops fimd_crtc_ops = {
 	.disable_plane = fimd_disable_plane,
 	.atomic_flush = fimd_atomic_flush,
 	.te_handler = fimd_te_handler,
-	.clock_enable = fimd_dp_clock_enable,
 };
 
 static irqreturn_t fimd_irq_handler(int irq, void *dev_id)
