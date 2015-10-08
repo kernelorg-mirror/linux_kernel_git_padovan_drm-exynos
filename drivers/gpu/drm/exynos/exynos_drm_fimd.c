@@ -85,6 +85,9 @@
 #define LCD_WR_HOLD(x)			((x) << 4)
 #define I80IFEN_ENABLE			(1 << 0)
 
+#define NO_DITHERING	0x00
+#define MIE_DITHERING	0x01
+
 /* FIMD has totally five hardware windows. */
 #define WINDOWS_NR	5
 #define CURSOR_WIN	4
@@ -153,12 +156,14 @@ struct fimd_context {
 	struct clk			*bus_clk;
 	struct clk			*lcd_clk;
 	void __iomem			*regs;
+	void __iomem			*regs_mie;
 	struct regmap			*sysreg;
 	unsigned long			irq_flags;
 	u32				vidcon0;
 	u32				vidcon1;
 	u32				vidout_con;
 	u32				i80ifcon;
+	u32				dither_mode;
 	bool				i80_if;
 	bool				suspended;
 	int				pipe;
@@ -376,6 +381,52 @@ static u32 fimd_calc_clkdiv(struct fimd_context *ctx,
 	return (clkdiv < 0x100) ? clkdiv : 0xff;
 }
 
+static void fimd_enable_dithering(struct exynos_drm_crtc *crtc)
+{
+	struct fimd_context *ctx = crtc->ctx;
+	struct drm_display_mode *mode = &crtc->base.state->adjusted_mode;
+	int bpd, fpd, sync_len, i;
+
+	DRM_DEBUG("first\n");
+	if (ctx->dither_mode == MIE_DITHERING) {
+		writel(DP_MIE_CLK_DP_ENABLE, ctx->regs + DP_MIE_CLKCON);
+
+		writel(MIE_HRESOL(mode->crtc_hdisplay) |
+		       MIE_VRESOL(mode->crtc_vdisplay) | MIE_MODE_UI,
+		       ctx->regs_mie + MIE_CTRL1);
+
+		writel(MIE_WINHADDR0(0) | MIE_WINHADDR1(mode->crtc_hdisplay),
+				ctx->regs_mie + MIE_WINHADDR);
+
+		writel(MIE_WINVADDR0(0) | MIE_WINVADDR1(mode->crtc_vdisplay),
+			ctx->regs_mie + MIE_WINVADDR);
+
+		writel(PWMCLKCNT(mode->crtc_vtotal * mode->crtc_htotal /
+			(MIE_PWMCLKVAL + 1)), ctx->regs_mie + MIE_PWMCLKCNT);
+
+		bpd = mode->crtc_vtotal - mode->crtc_vsync_end;
+		fpd = mode->crtc_vsync_start - mode->crtc_vdisplay;
+		sync_len = mode->crtc_vsync_end - mode->crtc_vsync_start;
+		writel(MIE_VBPD(bpd) | MIE_VFPD(fpd) | MIE_VSPW(sync_len),
+		       ctx->regs_mie + MIE_PWMVIDTCON1);
+
+		bpd = mode->crtc_htotal - mode->crtc_hsync_end;
+		fpd = mode->crtc_hsync_start - mode->crtc_hdisplay;
+		sync_len = mode->crtc_hsync_end - mode->crtc_hsync_start;
+		writel(MIE_HBPD(bpd) | MIE_HFPD(fpd) | MIE_HSPW(sync_len),
+		       ctx->regs_mie + MIE_PWMVIDTCON2);
+
+		writel(MIE_DITHCON_EN | MIE_RGB6MODE,
+		       ctx->regs_mie + MIE_AUXCON);
+
+		/* Bypass MIE image brightness enhancement */
+		for (i = 0; i <= 0x30; i += 4) {
+			writel(0, ctx->regs_mie + 0x100 + i);
+			writel(0, ctx->regs_mie + 0x200 + i);
+		}
+	}
+}
+
 static void fimd_commit(struct exynos_drm_crtc *crtc)
 {
 	struct fimd_context *ctx = crtc->ctx;
@@ -474,6 +525,8 @@ static void fimd_commit(struct exynos_drm_crtc *crtc)
 		val |= VIDCON0_CLKVAL_F(clkdiv - 1) | VIDCON0_CLKDIR;
 
 	writel(val, ctx->regs + VIDCON0);
+
+	fimd_enable_dithering(crtc);
 }
 
 
@@ -795,6 +848,9 @@ static void fimd_disable(struct exynos_drm_crtc *crtc)
 
 	writel(0, ctx->regs + VIDCON0);
 
+	if (ctx->dither_mode == MIE_DITHERING)
+		writel(DP_MIE_CLK_DISABLE, ctx->regs + DP_MIE_CLKCON);
+
 	clk_disable_unprepare(ctx->lcd_clk);
 	clk_disable_unprepare(ctx->bus_clk);
 
@@ -861,6 +917,10 @@ static void fimd_dp_clock_enable(struct exynos_drm_crtc *crtc, bool enable)
 {
 	struct fimd_context *ctx = crtc->ctx;
 	u32 val;
+
+	DRM_DEBUG_KMS("first\n");
+
+	return;
 
 	/*
 	 * Only Exynos 5250, 5260, 5410 and 542x requires enabling DP/MIE
@@ -1018,6 +1078,8 @@ static int fimd_probe(struct platform_device *pdev)
 		ctx->vidcon1 |= VIDCON1_INV_VDEN;
 	if (of_property_read_bool(dev->of_node, "samsung,invert-vclk"))
 		ctx->vidcon1 |= VIDCON1_INV_VCLK;
+	if (of_property_read_bool(dev->of_node, "samsung,mie-dithering"))
+		ctx->dither_mode = MIE_DITHERING;
 
 	i80_if_timings = of_get_child_by_name(dev->of_node, "i80-if-timings");
 	if (i80_if_timings) {
@@ -1074,6 +1136,12 @@ static int fimd_probe(struct platform_device *pdev)
 	ctx->regs = devm_ioremap_resource(dev, res);
 	if (IS_ERR(ctx->regs))
 		return PTR_ERR(ctx->regs);
+
+	if (ctx->dither_mode == MIE_DITHERING) {
+		ctx->regs_mie = devm_ioremap(dev, MIE_BASE_ADDRESS, 0x400);
+		if (!ctx->regs_mie)
+			ctx->dither_mode = NO_DITHERING;
+	}
 
 	res = platform_get_resource_byname(pdev, IORESOURCE_IRQ,
 					   ctx->i80_if ? "lcd_sys" : "vsync");

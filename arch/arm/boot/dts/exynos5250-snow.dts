@@ -267,6 +267,7 @@
 &fimd {
 	status = "okay";
 	samsung,invert-vclk;
+	samsung,mie-dithering;
 };
 
 &hdmi {
