@@ -1101,6 +1101,9 @@ static int mixer_atomic_check(struct exynos_drm_crtc *crtc,
 	struct drm_display_mode *mode = &state->adjusted_mode;
 	u32 w, h;
 
+	if (!state->enable)
+		return 0;
+
 	w = mode->hdisplay;
 	h = mode->vdisplay;
 
